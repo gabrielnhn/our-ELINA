@@ -29,10 +29,10 @@ INCLDIR = $(ELINA_PREFIX)/include
 INSTALL = install
 INSTALLd = install -d
 
-OBJS = fppoly.o backsubstitute.o compute_bounds.o expr.o relu_approx.o leakyrelu_approx.o round_approx.o clip_approx.o batch_normalization.o sign_approx.o s_curve_approx.o parabola_approx.o log_approx.o pool_approx.o lstm_approx.o maxpool_convex_hull.o
+OBJS = fppoly.o backsubstitute.o compute_bounds.o expr.o relu_approx.o leakyrelu_approx.o round_approx.o clip_approx.o batch_normalization.o sign_approx.o s_curve_approx.o parabola_approx.o log_approx.o pool_approx.o lstm_approx.o maxpool_convex_hull.o softmax_approx.o
 
 ifeq ($(IS_APRON),)
-LIBS = -L../partitions_api -lpartitions -L../elina_auxiliary -lelinaux -L../elina_linearize -lelinalinearize  -L../elina_zonotope -lzonotope $(MPFR_LIB_FLAG) -lmpfr $(GMP_LIB_FLAG) -lgmp -lm -lpthread $(CDD_LIB_FLAG) -lcdd
+LIBS = -L../partitions_api -lpartitions -L../elina_auxiliary -lelinaux -L../elina_linearize -lelinalinearize  -L../elina_zonotope -lzonotope $(MPFR_LIB_FLAG) -lmpfr $(GMP_LIB_FLAG) -lgmp -lm -lpthread $(CDD_LIB_FLAG) -lcdd -llapacke -lblas -lglpk
 INCLUDES = -I../elina_auxiliary -I../elina_linearize -I../elina_zonotope -I../partitions_api $(CDD_INCLUDE_FLAG) $(MPFR_INCLUDE_FLAG) $(GMP_INCLUDE_FLAG)
 else
 LIBS = -L../partitions_api -lpartitions -L$(APRON_PREFIX)/lib -lapron  -L../elina_linearize -lelinalinearize  -L../elina_zonotope -lzonotope $(MPFR_LIB_FLAG) -lmpfr $(GMP_LIB_FLAG) -lgmp -lm -lpthread $(CDD_LIB_FLAG) -lcdd
@@ -89,6 +89,9 @@ sign_approx.o : sign_approx.h sign_approx.c
 
 s_curve_approx.o : s_curve_approx.h s_curve_approx.c
 	$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) -o s_curve_approx.o s_curve_approx.c $(LIBS)
+
+softmax_approx.o : softmax_approx.h softmax_approx.c
+	$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) -o softmax_approx.o softmax_approx.c $(LIBS)
 
 parabola_approx.o : parabola_approx.h parabola_approx.c
 	$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) -o parabola_approx.o parabola_approx.c $(LIBS)

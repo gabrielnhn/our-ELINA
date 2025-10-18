@@ -33,6 +33,8 @@
 #include <assert.h>
 #include <cmath>
 #include <queue>
+#include <thrust/execution_policy.h>
+#include <thrust/sequence.h>
 #include <thrust/fill.h>
 #include "layers/input.h"
 #include "filters.h"

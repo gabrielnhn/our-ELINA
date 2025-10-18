@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/testGPUPoly.dir/test.cpp.o -o testGPUPoly  -Wl,-rpath,/home/vladi/ERAN/ELINA/gpupoly libgpupoly.so.0.13.0 /usr/lib/x86_64-linux-gnu/libcublas.so /usr/lib/x86_64-linux-gnu/libcublasLt.so /usr/lib/x86_64-linux-gnu/libculibos.a 

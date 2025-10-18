@@ -1,0 +1,3 @@
+/usr/local/lib/libgpupoly.so.0.13.0
+/usr/local/lib/libgpupoly.so.0.13
+/usr/local/lib/libgpupoly.so

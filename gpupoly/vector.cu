@@ -21,7 +21,8 @@
 	 \brief Implementation of Vector.
 	 \author Fran&ccedil;ois Serre
  */
-
+#include <thrust/count.h>
+#include <thrust/execution_policy.h>
 #include "matrix.h"
 
 template <typename T>
