@@ -60,10 +60,12 @@ void compute_lse_lower_tangent(double *c_coeffs, double *c_0,
     }
 }
 
+
+// important function.
 static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
                                     neuron_t **neurons, size_t dim,
                                     double temperature) {
-    size_t num_corners = 1 << dim;
+    size_t num_corners = 1 << dim; // 2 to the power 
 
     // --- Common Setup ---
     double **corners = (double **)malloc(num_corners * sizeof(double*));
@@ -78,12 +80,17 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     }
     generate_corners(corners, neurons, dim);
 
+    // this could be faulty
+    // avoid numerical problems for symbolic expr hyperplane stuff
+    // by normalizing -> appplying operations -> rescale back/denorm
+
     // **OPTION 5: Compute normalization parameters**
     double *center = (double *)malloc(dim * sizeof(double));
     double *half_width = (double *)malloc(dim * sizeof(double));
     if (!center || !half_width) {
         free(center); free(half_width);
-        for (size_t i = 0; i < num_corners; i++) free(corners[i]);
+        for (size_t i = 0; i < num_corners; i++)
+            free(corners[i]);
         free(corners);
         return;
     }
@@ -91,7 +98,8 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     for (size_t j = 0; j < dim; j++) {
         center[j] = (neurons[j]->lb + neurons[j]->ub) / 2.0;
         half_width[j] = (neurons[j]->ub - neurons[j]->lb) / 2.0;
-        if (half_width[j] < 1e-10) half_width[j] = 1.0; // Avoid division by zero
+        if (half_width[j] < 1e-10)
+            half_width[j] = 1.0; // Avoid division by zero
     }
 
     // **OPTION 5: Normalize corners to [-1, 1]**
@@ -128,7 +136,10 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
         lse_values[i] = compute_lse_at_point(corners[i], dim, temperature);
     }
 
-    // --- Attempt 1: Linear Programming (GLPK) ---
+
+    // this is where fun begins
+
+    // --- Attempt 1: Linear Programming (GLPK) library ---
     bool lp_solved_optimally = false;
     double lp_solution_norm[dim + 1]; // Normalized coefficients
 
@@ -204,6 +215,7 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     } else {
         lp_solved_optimally = false;
     }
+    // LinearProgram stuff finishes.
 
     glp_delete_prob(lp);
 
@@ -253,6 +265,7 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
                                          s, rcond, &rank);
 
         if (info != 0) {
+            // worst case scenario
             fprintf(stderr, "ERROR: LAPACK dgelsd failed with info = %d, falling back to tangent plane!\n", info);
             double *center_point = (double *)malloc(dim * sizeof(double));
             if (!center_point) {
@@ -341,6 +354,8 @@ static void bound_linear_function(double *phi_min, double *phi_max,
     }
 }
 
+
+// MAIN FUNCTION TO HANDLE SOFTMAX
 static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
                                   neuron_t **in_neurons, size_t dim,
                                   size_t output_idx, bool is_lower,
@@ -377,14 +392,18 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
         double softmax_val = exp((input_vals[output_idx] - max_val) / temperature) / sum_exp;
         softmax_val = (softmax_val < 0.0) ? 0.0 : ((softmax_val > 1.0) ? 1.0 : softmax_val);
         
+        // assign concrete bounds!
         out_neuron->lb = softmax_val;
         out_neuron->ub = softmax_val;
         
+        // assign symbolic bounds!
         expr_t *res = alloc_expr();
         res->inf_coeff = (double *)malloc(dim * sizeof(double));
         res->sup_coeff = (double *)malloc(dim * sizeof(double));
         res->inf_cst = softmax_val;
         res->sup_cst = softmax_val;
+
+        // keep it dense, whatever this means
         res->type = DENSE;
         res->size = dim;
         for (size_t j = 0; j < dim; j++) {
@@ -399,6 +418,8 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
     }
     
     // ========== ABSTRACT CASE ==========
+    // things are currently going wrong here!
+
     expr_t *res = alloc_expr();
     res->inf_coeff = (double *)malloc(dim * sizeof(double));
     res->sup_coeff = (double *)malloc(dim * sizeof(double));
@@ -416,6 +437,11 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
     
     if (is_lower) {
         // ========== LOWER BOUND ==========
+        // this method is important. look it up/. log-sum-exponente, monotonic increasing function.
+        // check jupyter notebook last code cell.
+        // log(sum(exp(z))) is convex therefore cool.
+
+
         compute_lse_upper_bound(d_coeffs, &d_0, in_neurons, dim, temperature);
         
         for (size_t j = 0; j < dim; j++) {
