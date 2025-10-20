@@ -50,6 +50,10 @@ void elina_double_interval_mul(double *a_inf, double *a_sup, double b_inf, doubl
 
 void elina_double_interval_div(double *a_inf, double *a_sup, double b_inf, double b_sup, double c_inf, double c_sup);
 
+bool elina_double_interval_canonicalize(double *inf, double *sup, bool integer, elina_scalar_discr_t discr);
+
+
+
 #ifdef __cplusplus
 }
 #endif

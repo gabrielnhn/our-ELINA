@@ -133,8 +133,8 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
         return;
     }
     for (size_t i = 0; i < num_corners; i++) {
-        lse_values[i] = compute_lse_at_point(corners[i], dim, temperature);
-    }
+        lse_values[i] = compute_lse_at_point(corners_norm[i], dim, temperature);
+}
 
 
     // this is where fun begins
@@ -162,10 +162,11 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
         }
     }
 
-    glp_add_rows(lp, (int)num_corners);
-    int *ia = (int *)malloc((1 + (int)(num_corners * (dim + 1))) * sizeof(int));
-    int *ja = (int *)malloc((1 + (int)(num_corners * (dim + 1))) * sizeof(int));
-    double *ar = (double *)malloc((1 + (int)(num_corners * (dim + 1))) * sizeof(double));
+    glp_add_rows(lp, (int)num_corners + 1);
+    int max_nnz = (int)(num_corners * (dim + 1) + dim + 2);
+    int *ia = (int *)malloc((1 + max_nnz) * sizeof(int));
+    int *ja = (int *)malloc((1 + max_nnz) * sizeof(int));
+    double *ar = (double *)malloc((1 + max_nnz) * sizeof(double));
     if (!ia || !ja || !ar) {
         free(ia); free(ja); free(ar);
         glp_delete_prob(lp);
@@ -197,6 +198,23 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
         ar[constraint_idx] = -1.0;
         constraint_idx++;
     }
+    glp_add_rows(lp, 1);
+    int row_id = (int)num_corners + 1;
+    
+    
+    glp_set_row_name(lp, row_id, "sum_constraint");
+    glp_set_row_bnds(lp, row_id, GLP_FX, 0.8, 1.2);
+
+    for (size_t j = 0; j < dim; j++) {
+        ia[constraint_idx] = row_id;
+        ja[constraint_idx] = (int)(j + 1);  // valid columns 1..dim
+        ar[constraint_idx] = +1.0;
+        constraint_idx++;
+    }
+
+    // (optional sanity print)
+    fprintf(stderr, "[DEBUG] LP rows: %zu (corners %zu + 1), cols: %zu, nnz: %d\n",
+            (size_t)glp_get_num_rows(lp), num_corners, (size_t)glp_get_num_cols(lp), constraint_idx - 1);
 
     glp_load_matrix(lp, constraint_idx - 1, ia, ja, ar);
     free(ia); free(ja); free(ar);
@@ -301,13 +319,13 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     }
 
     // **OPTION 5: Un-scale coefficients back to original space**
-    for (size_t j = 0; j < dim; j++) {
-        d_coeffs[j] = lp_solution_norm[j] / half_width[j];
-    }
+    // Correct back-transformation to original coordinates
     *d_0 = lp_solution_norm[dim];
     for (size_t j = 0; j < dim; j++) {
-        *d_0 -= lp_solution_norm[j] * center[j] / half_width[j];
+        d_coeffs[j] = lp_solution_norm[j] / half_width[j];
+        *d_0 -= (lp_solution_norm[j] / half_width[j]) * center[j];
     }
+
 
     // --- Add Safety Margin ---
     double max_violation = 0.0;
@@ -455,11 +473,12 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
         double phi_min, phi_max;
         bound_linear_function(&phi_min, &phi_max, phi_coeffs, -d_0, in_neurons, dim);
         
+        
         double exp_min = exp(phi_min);
         double exp_max = exp(phi_max);
         double slope, intercept;
         
-        if (fabs(phi_max - phi_min) < 1e-9) {
+        if (fabs(phi_max - phi_min) < 1e-5) {
             slope = exp_min;
             intercept = 0.0;
         } else {
@@ -633,7 +652,7 @@ void handle_softmax_layer(elina_manager_t *man, elina_abstract0_t *element,
     
     // Temperature scales with interval width to stabilize approximation
     // For small intervals: T ≈ 1, for large: T increases
-    double temperature = 1.0 + max_interval_width / 10.0;
+    double temperature = 1.0;
     
     fprintf(stderr, "DEBUG: Adaptive temperature: %.2f (max_interval_width: %.2f)\n", 
             temperature, max_interval_width);
