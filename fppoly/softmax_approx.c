@@ -3,198 +3,144 @@
 #include <glpk.h>
 #include <lapacke.h>
 
+// -----------------------------------------------------------
+// Utility: LogSumExp computation at a given point
+// -----------------------------------------------------------
 static double compute_lse_at_point(const double *z, size_t dim, double temperature) {
     double max_val = z[0];
     for (size_t i = 1; i < dim; i++) {
         if (z[i] > max_val) max_val = z[i];
     }
-    
     double sum = 0.0;
     for (size_t i = 0; i < dim; i++) {
         sum += exp((z[i] - max_val) / temperature);
     }
-    
     return max_val + temperature * log(sum);
 }
 
+// -----------------------------------------------------------
+// Utility: Gradient of LogSumExp (softmax at point z)
+// -----------------------------------------------------------
 static void compute_lse_gradient(double *grad, const double *z, size_t dim, double temperature) {
     double max_val = z[0];
     for (size_t i = 1; i < dim; i++) {
         if (z[i] > max_val) max_val = z[i];
     }
-    
     double sum = 0.0;
     for (size_t i = 0; i < dim; i++) {
         grad[i] = exp((z[i] - max_val) / temperature);
         sum += grad[i];
     }
-    
-    for (size_t i = 0; i < dim; i++) {
-        grad[i] /= sum;
-    }
+    for (size_t i = 0; i < dim; i++) grad[i] /= sum;
 }
 
+// -----------------------------------------------------------
+// Utility: Generate all 2^dim corners of the input box
+// -----------------------------------------------------------
 static void generate_corners(double **corners, neuron_t **neurons, size_t dim) {
     size_t num_corners = 1 << dim;
-    
     for (size_t i = 0; i < num_corners; i++) {
         for (size_t j = 0; j < dim; j++) {
-            if (i & (1 << j)) {
-                corners[i][j] = neurons[j]->ub;
-            } else {
-                corners[i][j] = neurons[j]->lb;
-            }
+            corners[i][j] = (i & (1 << j)) ? neurons[j]->ub : neurons[j]->lb;
         }
     }
 }
 
+// -----------------------------------------------------------
+// Tangent (lower) affine plane at a given point
+// -----------------------------------------------------------
 void compute_lse_lower_tangent(double *c_coeffs, double *c_0,
-                                     const double *point, size_t dim,
-                                     double temperature) {
+                               const double *point, size_t dim,
+                               double temperature) {
     double lse_val = compute_lse_at_point(point, dim, temperature);
     compute_lse_gradient(c_coeffs, point, dim, temperature);
-    
     *c_0 = lse_val;
-    for (size_t i = 0; i < dim; i++) {
-        *c_0 -= c_coeffs[i] * point[i];
-    }
+    for (size_t i = 0; i < dim; i++) *c_0 -= c_coeffs[i] * point[i];
 }
 
-
-// important function.
+// -----------------------------------------------------------
+// Main: Compute upper affine bound (DeepPoly convex upper hull)
+// -----------------------------------------------------------
 static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
                                     neuron_t **neurons, size_t dim,
                                     double temperature) {
-    size_t num_corners = 1 << dim; // 2 to the power 
 
-    // --- Common Setup ---
-    double **corners = (double **)malloc(num_corners * sizeof(double*));
-    if (!corners) { return; }
-    for (size_t i = 0; i < num_corners; i++) {
-        corners[i] = (double *)malloc(dim * sizeof(double));
-        if (!corners[i]) { 
-            for (size_t k = 0; k < i; k++) free(corners[k]);
-            free(corners);
-            return;
-        }
-    }
+    size_t num_corners = 1 << dim;
+
+    // ----------------- Prepare corner samples -----------------
+    double **corners = (double **)malloc(num_corners * sizeof(double *));
+    for (size_t i = 0; i < num_corners; i++) corners[i] = (double *)malloc(dim * sizeof(double));
     generate_corners(corners, neurons, dim);
 
-    // this could be faulty
-    // avoid numerical problems for symbolic expr hyperplane stuff
-    // by normalizing -> appplying operations -> rescale back/denorm
-
-    // **OPTION 5: Compute normalization parameters**
     double *center = (double *)malloc(dim * sizeof(double));
     double *half_width = (double *)malloc(dim * sizeof(double));
-    if (!center || !half_width) {
-        free(center); free(half_width);
-        for (size_t i = 0; i < num_corners; i++)
-            free(corners[i]);
-        free(corners);
-        return;
-    }
-    
     for (size_t j = 0; j < dim; j++) {
         center[j] = (neurons[j]->lb + neurons[j]->ub) / 2.0;
         half_width[j] = (neurons[j]->ub - neurons[j]->lb) / 2.0;
-        if (half_width[j] < 1e-10)
-            half_width[j] = 1.0; // Avoid division by zero
+        if (half_width[j] < 1e-10) half_width[j] = 1.0;
     }
 
-    // **OPTION 5: Normalize corners to [-1, 1]**
-    double **corners_norm = (double **)malloc(num_corners * sizeof(double*));
-    if (!corners_norm) {
-        free(center); free(half_width);
-        for (size_t i = 0; i < num_corners; i++) free(corners[i]);
-        free(corners);
-        return;
-    }
+    double **corners_norm = (double **)malloc(num_corners * sizeof(double *));
     for (size_t i = 0; i < num_corners; i++) {
         corners_norm[i] = (double *)malloc(dim * sizeof(double));
-        if (!corners_norm[i]) {
-            for (size_t k = 0; k < i; k++) free(corners_norm[k]);
-            free(corners_norm);
-            free(center); free(half_width);
-            for (size_t k = 0; k < num_corners; k++) free(corners[k]);
-            free(corners);
-            return;
-        }
-        for (size_t j = 0; j < dim; j++) {
+        for (size_t j = 0; j < dim; j++)
             corners_norm[i][j] = (corners[i][j] - center[j]) / half_width[j];
-        }
     }
 
     double *lse_values = (double *)malloc(num_corners * sizeof(double));
-    if (!lse_values) {
-        for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
-        free(corners); free(corners_norm);
-        free(center); free(half_width);
-        return;
-    }
-    for (size_t i = 0; i < num_corners; i++) {
+    for (size_t i = 0; i < num_corners; i++)
         lse_values[i] = compute_lse_at_point(corners[i], dim, temperature);
-    }
 
-
-    // this is where fun begins
-
-    // --- Attempt 1: Linear Programming (GLPK) library ---
-    bool lp_solved_optimally = false;
-    double lp_solution_norm[dim + 1]; // Normalized coefficients
-
+    // ----------------- Build LP (GLPK) -----------------
     glp_prob *lp = glp_create_prob();
     glp_set_prob_name(lp, "LSE_UpperBound_LP");
-    glp_set_obj_dir(lp, GLP_MIN);
+    glp_set_obj_dir(lp, GLP_MAX); // FIXED: we want to maximize intercept b
 
     glp_add_cols(lp, dim + 1);
     for (size_t j = 0; j < dim + 1; j++) {
         char col_name[16];
-        sprintf(col_name, "d%d", (int)j);
+        sprintf(col_name, "d%zu", j);
         glp_set_col_name(lp, (int)(j + 1), col_name);
         glp_set_col_bnds(lp, (int)(j + 1), GLP_FR, 0.0, 0.0);
-
-        if (j < dim) {
-            // **OPTION 5: Use normalized center (which is 0)**
-            glp_set_obj_coef(lp, (int)(j + 1), 0.0);
-        } else {
-            glp_set_obj_coef(lp, (int)(j + 1), 1.0);
-        }
+        glp_set_obj_coef(lp, (int)(j + 1), (j == dim) ? 1.0 : 0.0);
     }
 
-    glp_add_rows(lp, (int)num_corners);
-    int *ia = (int *)malloc((1 + (int)(num_corners * (dim + 1))) * sizeof(int));
-    int *ja = (int *)malloc((1 + (int)(num_corners * (dim + 1))) * sizeof(int));
-    double *ar = (double *)malloc((1 + (int)(num_corners * (dim + 1))) * sizeof(double));
-    if (!ia || !ja || !ar) {
-        free(ia); free(ja); free(ar);
-        glp_delete_prob(lp);
-        free(lse_values);
-        for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
-        free(corners); free(corners_norm);
-        free(center); free(half_width);
-        return;
-    }
-
+    glp_add_rows(lp, (int)num_corners + 1);
+    int max_nnz = (int)(num_corners * (dim + 1) + dim + 2);
+    int *ia = (int *)malloc((1 + max_nnz) * sizeof(int));
+    int *ja = (int *)malloc((1 + max_nnz) * sizeof(int));
+    double *ar = (double *)malloc((1 + max_nnz) * sizeof(double));
     int constraint_idx = 1;
+
+    // ----------------- Corner constraints -----------------
     for (size_t i = 0; i < num_corners; i++) {
         char row_name[16];
-        sprintf(row_name, "c%d", (int)i);
+        sprintf(row_name, "c%zu", i);
         glp_set_row_name(lp, (int)(i + 1), row_name);
-        glp_set_row_bnds(lp, (int)(i + 1), GLP_UP, 0.0, -lse_values[i]);
+        glp_set_row_bnds(lp, (int)(i + 1), GLP_LO, lse_values[i], 0.0);
 
-        // **OPTION 5: Use normalized corners**
         for (size_t j = 0; j < dim; j++) {
-            if (fabs(corners_norm[i][j]) > 1e-12) {
-                ia[constraint_idx] = (int)(i + 1);
-                ja[constraint_idx] = (int)(j + 1);
-                ar[constraint_idx] = -corners_norm[i][j];
-                constraint_idx++;
-            }
+            ia[constraint_idx] = (int)(i + 1);
+            ja[constraint_idx] = (int)(j + 1);
+            ar[constraint_idx] = corners_norm[i][j]; // positive
+            constraint_idx++;
         }
+
         ia[constraint_idx] = (int)(i + 1);
         ja[constraint_idx] = (int)(dim + 1);
-        ar[constraint_idx] = -1.0;
+        ar[constraint_idx] = 1.0; // bias positive
+        constraint_idx++;
+    }
+
+    // ----------------- Normalization constraint (optional) -----------------
+    int row_id = (int)num_corners + 1;
+    glp_set_row_name(lp, row_id, "sum_constraint");
+    glp_set_row_bnds(lp, row_id, GLP_DB, 0.8, 1.2);
+
+    for (size_t j = 0; j < dim; j++) {
+        ia[constraint_idx] = row_id;
+        ja[constraint_idx] = (int)(j + 1);
+        ar[constraint_idx] = 1.0;
         constraint_idx++;
     }
 
@@ -206,143 +152,58 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     parm.msg_lev = GLP_MSG_OFF;
     int lp_status = glp_simplex(lp, &parm);
 
+    double lp_solution_norm[dim + 1];
+    bool lp_solved_optimally = false;
     if (lp_status == 0 && glp_get_status(lp) == GLP_OPT) {
         lp_solved_optimally = true;
-        for (size_t j = 0; j < dim; j++) {
+        for (size_t j = 0; j < dim + 1; j++)
             lp_solution_norm[j] = glp_get_col_prim(lp, (int)(j + 1));
-        }
-        lp_solution_norm[dim] = glp_get_col_prim(lp, (int)(dim + 1));
-    } else {
-        lp_solved_optimally = false;
     }
-    // LinearProgram stuff finishes.
 
     glp_delete_prob(lp);
 
-    // --- Attempt 2: Fallback to SVD Least Squares (LAPACK) if LP failed ---
+    // ----------------- Fallback: Tangent if LP failed -----------------
     if (!lp_solved_optimally) {
-        fprintf(stderr, "INFO: GLPK LP solver failed, falling back to SVD LS.\n");
-
-        lapack_int m_lapack = (lapack_int)num_corners;
-        lapack_int n_lapack = (lapack_int)(dim + 1);
-        lapack_int nrhs_lapack = 1;
-        lapack_int lda_lapack = m_lapack;
-        lapack_int ldb_lapack = m_lapack;
-        double rcond = -1.0;
-        lapack_int rank;
-        lapack_int minmn = (m_lapack < n_lapack) ? m_lapack : n_lapack;
-        double *s = (double *)malloc(minmn * sizeof(double));
-
-        double *A_colmajor = (double *)malloc(m_lapack * n_lapack * sizeof(double));
-        double *b_copy = (double *)malloc(ldb_lapack * nrhs_lapack * sizeof(double));
-
-        if (!s || !A_colmajor || !b_copy) {
-            free(s); free(A_colmajor); free(b_copy);
-            free(lse_values);
-            for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
-            free(corners); free(corners_norm);
-            free(center); free(half_width);
-            return;
+        double *center_point = (double *)malloc(dim * sizeof(double));
+        for (size_t j = 0; j < dim; j++)
+            center_point[j] = (neurons[j]->lb + neurons[j]->ub) / 2.0;
+        compute_lse_lower_tangent(d_coeffs, d_0, center_point, dim, temperature);
+        *d_0 += 1e-6;
+        free(center_point);
+    } else {
+        // Rescale coefficients to original space
+        *d_0 = lp_solution_norm[dim];
+        for (size_t j = 0; j < dim; j++) {
+            d_coeffs[j] = lp_solution_norm[j] / half_width[j];
+            *d_0 -= (lp_solution_norm[j] / half_width[j]) * center[j];
         }
-
-        // **OPTION 5: Use normalized corners in LAPACK**
-        for (lapack_int j = 0; j < n_lapack; j++) {
-            for (lapack_int i = 0; i < m_lapack; i++) {
-                if (j < (int)dim) {
-                    A_colmajor[j * m_lapack + i] = corners_norm[i][j];
-                } else {
-                    A_colmajor[j * m_lapack + i] = 1.0;
-                }
-            }
-        }
-        for (lapack_int i = 0; i < m_lapack; i++) {
-            b_copy[i] = lse_values[i];
-        }
-
-        lapack_int info = LAPACKE_dgelsd(LAPACK_COL_MAJOR, m_lapack, n_lapack, nrhs_lapack,
-                                         A_colmajor, lda_lapack,
-                                         b_copy, ldb_lapack,
-                                         s, rcond, &rank);
-
-        if (info != 0) {
-            // worst case scenario
-            fprintf(stderr, "ERROR: LAPACK dgelsd failed with info = %d, falling back to tangent plane!\n", info);
-            double *center_point = (double *)malloc(dim * sizeof(double));
-            if (!center_point) {
-                free(s); free(A_colmajor); free(b_copy);
-                free(lse_values);
-                for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
-                free(corners); free(corners_norm);
-                free(center); free(half_width);
-                return;
-            }
-            for (size_t j = 0; j < dim; j++) {
-                center_point[j] = (neurons[j]->lb + neurons[j]->ub) / 2.0;
-            }
-            compute_lse_lower_tangent(d_coeffs, d_0, center_point, dim, temperature);
-            *d_0 += 1e-6;
-            free(center_point);
-            free(s); free(A_colmajor); free(b_copy);
-            free(lse_values);
-            for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
-            free(corners); free(corners_norm);
-            free(center); free(half_width);
-            return;
-        } else {
-            for (size_t j = 0; j < dim; j++) {
-                lp_solution_norm[j] = b_copy[j];
-            }
-            lp_solution_norm[dim] = b_copy[dim];
-        }
-
-        free(s);
-        free(A_colmajor);
-        free(b_copy);
     }
 
-    // **OPTION 5: Un-scale coefficients back to original space**
-    for (size_t j = 0; j < dim; j++) {
-        d_coeffs[j] = lp_solution_norm[j] / half_width[j];
-    }
-    *d_0 = lp_solution_norm[dim];
-    for (size_t j = 0; j < dim; j++) {
-        *d_0 -= lp_solution_norm[j] * center[j] / half_width[j];
-    }
-
-    // --- Add Safety Margin ---
+    // ----------------- Safety margin to ensure validity -----------------
     double max_violation = 0.0;
     for (size_t i = 0; i < num_corners; i++) {
         double approx = *d_0;
-        for (size_t j = 0; j < dim; j++) {
+        for (size_t j = 0; j < dim; j++)
             approx += d_coeffs[j] * corners[i][j];
-        }
         if (approx < lse_values[i]) {
-            double violation = lse_values[i] - approx;
-            if (violation > max_violation) {
-                max_violation = violation;
-            }
+            double diff = lse_values[i] - approx;
+            if (diff > max_violation) max_violation = diff;
         }
     }
     *d_0 += max_violation + 1e-6;
 
-    // Cleanup
-    for (size_t i = 0; i < num_corners; i++) {
-        free(corners[i]);
-        free(corners_norm[i]);
-    }
-    free(corners);
-    free(corners_norm);
-    free(lse_values);
-    free(center);
-    free(half_width);
+    for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
+    free(corners); free(corners_norm); free(center); free(half_width); free(lse_values);
 }
 
+// -----------------------------------------------------------
+// Bound a linear function over neuron intervals
+// -----------------------------------------------------------
 static void bound_linear_function(double *phi_min, double *phi_max,
                                  const double *coeffs, double c_0,
                                  neuron_t **neurons, size_t dim) {
     *phi_min = c_0;
     *phi_max = c_0;
-    
     for (size_t j = 0; j < dim; j++) {
         if (coeffs[j] > 0) {
             *phi_min += coeffs[j] * neurons[j]->lb;
@@ -353,7 +214,6 @@ static void bound_linear_function(double *phi_min, double *phi_max,
         }
     }
 }
-
 
 // MAIN FUNCTION TO HANDLE SOFTMAX
 static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
