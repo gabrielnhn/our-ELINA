@@ -145,6 +145,10 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     for (size_t i = 0; i < num_corners; i++) {
         lse_values[i] = compute_lse_at_point(corners[i], dim, temperature);
     }
+    // for (size_t i = 0; i < num_corners; i++) {
+    //     lse_values[i] = compute_lse_at_point(corners_norm[i], dim, temperature);
+    // }
+
 
 
     // this is where fun begins
@@ -205,7 +209,7 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
         }
         ia[constraint_idx] = (int)(i + 1);
         ja[constraint_idx] = (int)(dim + 1);
-        ar[constraint_idx] = -1.0;
+        ar[constraint_idx] = 1.0;
         constraint_idx++;
     }
 
@@ -559,36 +563,26 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
                     output_idx, max_coeff, final_intercept);
             
             g_exp_tier4_fallback++;
-
-            // Better fallback: center-based tangent
-            double *center_point = (double *)malloc(dim * sizeof(double));
-            for (size_t j = 0; j < dim; j++) {
-                center_point[j] = (in_neurons[j]->lb + in_neurons[j]->ub) / 2.0;
-            }
-            
-            double input_vals[dim];
-            for (size_t j = 0; j < dim; j++) {
-                input_vals[j] = center_point[j];
-            }
-            double max_val = input_vals[0];
-            for (size_t j = 1; j < dim; j++) {
-                if (input_vals[j] > max_val) max_val = input_vals[j];
-            }
-            double sum_exp = 0.0;
-            for (size_t j = 0; j < dim; j++) {
-                sum_exp += exp((input_vals[j] - max_val) / temperature);
-            }
-            double softmax_at_center = exp((input_vals[output_idx] - max_val) / temperature) / sum_exp;
+            // The only sound bound we can assert here is [0, 1].
+            // We are calculating the upper bound (is_lower = false),
+            // so we set the expression to the constant [0, 1].
             
             for (size_t j = 0; j < dim; j++) {
                 res->inf_coeff[j] = 0.0;
                 res->sup_coeff[j] = 0.0;
             }
-            res->inf_cst = -fmin(1.0, softmax_at_center * 1.5);
-            res->sup_cst = fmin(1.0, softmax_at_center * 1.5);
+            // Set expression to constant interval [0, 1]
+            // Remember: inf_cst = -L = -0.0
+            //           sup_cst =  U =  1.0
+            res->inf_cst = 0.0; 
+            res->sup_cst = 1.0; 
             
-            free(center_point);
-        } else {
+            // Free the center_point you allocated but no longer need
+            // free(center_point); // You had this in your original TIER4 block
+            
+        } 
+        else
+        {
             for (size_t j = 0; j < dim; j++) {
                 double final_slope = slope * phi_coeffs[j];
                 res->inf_coeff[j] = -final_slope;
