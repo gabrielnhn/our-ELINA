@@ -6,6 +6,7 @@
 #include <stdio.h> 
 
 // COUNTERS FOR EVALUATION
+static unsigned long total_calls = 0;
 static unsigned long g_lse_lp_success = 0;
 static unsigned long g_lse_svd_fallback = 0;
 static unsigned long g_lse_tangent_fallback = 0;
@@ -147,6 +148,7 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
 
 
     // this is where fun begins
+    total_calls++;
 
     // --- Attempt 1: Linear Programming (GLPK) library ---
     bool lp_solved_optimally = false;
@@ -720,6 +722,7 @@ double apply_softmax_uexpr(fppoly_internal_t *pr, expr_t **uexpr_p,
 
 void print_softmax_approximation_stats(void) {
     fprintf(stderr, "\n--- Softmax Approximation Stats ---\n");
+    fprintf(stderr, "TOTAL CALLS:   %lu\n", total_calls);
     fprintf(stderr, "LSE LP Success (Tier 1):   %lu\n", g_lse_lp_success);
     fprintf(stderr, "LSE SVD Fallback (Tier 2):   %lu\n", g_lse_svd_fallback);
     fprintf(stderr, "LSE Tangent Fallback (Tier 3): %lu\n", g_lse_tangent_fallback);
