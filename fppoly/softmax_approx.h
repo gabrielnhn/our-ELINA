@@ -27,6 +27,9 @@ extern "C" {
 
 #include "backsubstitute.h"
 
+void print_softmax_approximation_stats(void);
+
+
 /**
  * Handle softmax layer with LSE-based approximation
  * 

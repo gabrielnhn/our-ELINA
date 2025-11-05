@@ -3,6 +3,15 @@
 #include <glpk.h>
 #include <lapacke.h>
 
+#include <stdio.h> 
+
+// COUNTERS FOR EVALUATION
+static unsigned long g_lse_lp_success = 0;
+static unsigned long g_lse_svd_fallback = 0;
+static unsigned long g_lse_tangent_fallback = 0;
+static unsigned long g_exp_tier4_fallback = 0;
+
+
 static double compute_lse_at_point(const double *z, size_t dim, double temperature) {
     double max_val = z[0];
     for (size_t i = 1; i < dim; i++) {
@@ -208,6 +217,9 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
 
     if (lp_status == 0 && glp_get_status(lp) == GLP_OPT) {
         lp_solved_optimally = true;
+
+        g_lse_lp_success++;
+
         for (size_t j = 0; j < dim; j++) {
             lp_solution_norm[j] = glp_get_col_prim(lp, (int)(j + 1));
         }
@@ -222,6 +234,8 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     // --- Attempt 2: Fallback to SVD Least Squares (LAPACK) if LP failed ---
     if (!lp_solved_optimally) {
         fprintf(stderr, "INFO: GLPK LP solver failed, falling back to SVD LS.\n");
+
+        g_lse_svd_fallback++;
 
         lapack_int m_lapack = (lapack_int)num_corners;
         lapack_int n_lapack = (lapack_int)(dim + 1);
@@ -267,6 +281,9 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
         if (info != 0) {
             // worst case scenario
             fprintf(stderr, "ERROR: LAPACK dgelsd failed with info = %d, falling back to tangent plane!\n", info);
+            
+            g_lse_tangent_fallback++;
+            
             double *center_point = (double *)malloc(dim * sizeof(double));
             if (!center_point) {
                 free(s); free(A_colmajor); free(b_copy);
@@ -539,6 +556,8 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
             fprintf(stderr, "TIER4 TRIGGERED: output %zu, max_coeff=%.2e, intercept=%.2e\n",
                     output_idx, max_coeff, final_intercept);
             
+            g_exp_tier4_fallback++;
+
             // Better fallback: center-based tangent
             double *center_point = (double *)malloc(dim * sizeof(double));
             for (size_t j = 0; j < dim; j++) {
@@ -697,4 +716,13 @@ double apply_softmax_uexpr(fppoly_internal_t *pr, expr_t **uexpr_p,
                           size_t output_idx, double temperature) {
     return apply_softmax_expr(pr, uexpr_p, neurons, num_neurons,
                              output_idx, false, temperature);
+}
+
+void print_softmax_approximation_stats(void) {
+    fprintf(stderr, "\n--- Softmax Approximation Stats ---\n");
+    fprintf(stderr, "LSE LP Success (Tier 1):   %lu\n", g_lse_lp_success);
+    fprintf(stderr, "LSE SVD Fallback (Tier 2):   %lu\n", g_lse_svd_fallback);
+    fprintf(stderr, "LSE Tangent Fallback (Tier 3): %lu\n", g_lse_tangent_fallback);
+    fprintf(stderr, "Exp TIER4 Fallback (Tier 4): %lu\n", g_exp_tier4_fallback);
+    fprintf(stderr, "-----------------------------------\n");
 }
