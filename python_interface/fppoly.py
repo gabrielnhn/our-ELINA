@@ -1611,3 +1611,14 @@ def update_activation_lower_bound_for_neuron(man, element,layerno, neuron_no, co
         print(inst)
         print('Problem with loading/calling "update_activation_lower_bound_for_neuron" from "fppoly.so"')
         print('Make sure you are passing ElinaManagerPtr, ElinaAbstract0Ptr, c_size_t, c_size_t, POINTER(c_double), POINTER(c_size_t), c_size_t to the function')
+
+
+def print_softmax_approximation_stats(man):
+    try:
+        print_stats_c = fppoly_api.print_softmax_approximation_stats
+        print_stats_c.restype = None
+        print_stats_c.argtypes = [] # No arguments
+        print_stats_c()
+    except Exception as inst:
+        print('Problem with loading/calling "print_softmax_approximation_stats"')
+        print(inst)

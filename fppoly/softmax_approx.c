@@ -3,9 +3,16 @@
 #include <glpk.h>
 #include <lapacke.h>
 
-// -----------------------------------------------------------
-// Utility: LogSumExp computation at a given point
-// -----------------------------------------------------------
+#include <stdio.h> 
+
+// COUNTERS FOR EVALUATION
+static unsigned long total_calls = 0;
+static unsigned long g_lse_lp_success = 0;
+static unsigned long g_lse_svd_fallback = 0;
+static unsigned long g_lse_tangent_fallback = 0;
+static unsigned long g_exp_tier4_fallback = 0;
+
+
 static double compute_lse_at_point(const double *z, size_t dim, double temperature) {
     double max_val = z[0];
     for (size_t i = 1; i < dim; i++) {
@@ -90,6 +97,19 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     double *lse_values = (double *)malloc(num_corners * sizeof(double));
     for (size_t i = 0; i < num_corners; i++)
         lse_values[i] = compute_lse_at_point(corners[i], dim, temperature);
+    }
+    // for (size_t i = 0; i < num_corners; i++) {
+    //     lse_values[i] = compute_lse_at_point(corners_norm[i], dim, temperature);
+    // }
+
+
+
+    // this is where fun begins
+    total_calls++;
+
+    // --- Attempt 1: Linear Programming (GLPK) library ---
+    bool lp_solved_optimally = false;
+    double lp_solution_norm[dim + 1]; // Normalized coefficients
 
     // ----------------- Build LP (GLPK) -----------------
     glp_prob *lp = glp_create_prob();
@@ -128,18 +148,6 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
 
         ia[constraint_idx] = (int)(i + 1);
         ja[constraint_idx] = (int)(dim + 1);
-        ar[constraint_idx] = 1.0; // bias positive
-        constraint_idx++;
-    }
-
-    // ----------------- Normalization constraint (optional) -----------------
-    int row_id = (int)num_corners + 1;
-    glp_set_row_name(lp, row_id, "sum_constraint");
-    glp_set_row_bnds(lp, row_id, GLP_DB, 0.8, 1.2);
-
-    for (size_t j = 0; j < dim; j++) {
-        ia[constraint_idx] = row_id;
-        ja[constraint_idx] = (int)(j + 1);
         ar[constraint_idx] = 1.0;
         constraint_idx++;
     }
@@ -156,7 +164,10 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
     bool lp_solved_optimally = false;
     if (lp_status == 0 && glp_get_status(lp) == GLP_OPT) {
         lp_solved_optimally = true;
-        for (size_t j = 0; j < dim + 1; j++)
+
+        g_lse_lp_success++;
+
+        for (size_t j = 0; j < dim; j++) {
             lp_solution_norm[j] = glp_get_col_prim(lp, (int)(j + 1));
     }
 
@@ -164,18 +175,83 @@ static void compute_lse_upper_bound(double *d_coeffs, double *d_0,
 
     // ----------------- Fallback: Tangent if LP failed -----------------
     if (!lp_solved_optimally) {
-        double *center_point = (double *)malloc(dim * sizeof(double));
-        for (size_t j = 0; j < dim; j++)
-            center_point[j] = (neurons[j]->lb + neurons[j]->ub) / 2.0;
-        compute_lse_lower_tangent(d_coeffs, d_0, center_point, dim, temperature);
-        *d_0 += 1e-6;
-        free(center_point);
-    } else {
-        // Rescale coefficients to original space
-        *d_0 = lp_solution_norm[dim];
-        for (size_t j = 0; j < dim; j++) {
-            d_coeffs[j] = lp_solution_norm[j] / half_width[j];
-            *d_0 -= (lp_solution_norm[j] / half_width[j]) * center[j];
+        fprintf(stderr, "INFO: GLPK LP solver failed, falling back to SVD LS.\n");
+
+        g_lse_svd_fallback++;
+
+        lapack_int m_lapack = (lapack_int)num_corners;
+        lapack_int n_lapack = (lapack_int)(dim + 1);
+        lapack_int nrhs_lapack = 1;
+        lapack_int lda_lapack = m_lapack;
+        lapack_int ldb_lapack = m_lapack;
+        double rcond = -1.0;
+        lapack_int rank;
+        lapack_int minmn = (m_lapack < n_lapack) ? m_lapack : n_lapack;
+        double *s = (double *)malloc(minmn * sizeof(double));
+
+        double *A_colmajor = (double *)malloc(m_lapack * n_lapack * sizeof(double));
+        double *b_copy = (double *)malloc(ldb_lapack * nrhs_lapack * sizeof(double));
+
+        if (!s || !A_colmajor || !b_copy) {
+            free(s); free(A_colmajor); free(b_copy);
+            free(lse_values);
+            for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
+            free(corners); free(corners_norm);
+            free(center); free(half_width);
+            return;
+        }
+
+        // **OPTION 5: Use normalized corners in LAPACK**
+        for (lapack_int j = 0; j < n_lapack; j++) {
+            for (lapack_int i = 0; i < m_lapack; i++) {
+                if (j < (int)dim) {
+                    A_colmajor[j * m_lapack + i] = corners_norm[i][j];
+                } else {
+                    A_colmajor[j * m_lapack + i] = 1.0;
+                }
+            }
+        }
+        for (lapack_int i = 0; i < m_lapack; i++) {
+            b_copy[i] = lse_values[i];
+        }
+
+        lapack_int info = LAPACKE_dgelsd(LAPACK_COL_MAJOR, m_lapack, n_lapack, nrhs_lapack,
+                                         A_colmajor, lda_lapack,
+                                         b_copy, ldb_lapack,
+                                         s, rcond, &rank);
+
+        if (info != 0) {
+            // worst case scenario
+            fprintf(stderr, "ERROR: LAPACK dgelsd failed with info = %d, falling back to tangent plane!\n", info);
+            
+            g_lse_tangent_fallback++;
+            
+            double *center_point = (double *)malloc(dim * sizeof(double));
+            if (!center_point) {
+                free(s); free(A_colmajor); free(b_copy);
+                free(lse_values);
+                for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
+                free(corners); free(corners_norm);
+                free(center); free(half_width);
+                return;
+            }
+            for (size_t j = 0; j < dim; j++) {
+                center_point[j] = (neurons[j]->lb + neurons[j]->ub) / 2.0;
+            }
+            compute_lse_lower_tangent(d_coeffs, d_0, center_point, dim, temperature);
+            *d_0 += 1e-6;
+            free(center_point);
+            free(s); free(A_colmajor); free(b_copy);
+            free(lse_values);
+            for (size_t i = 0; i < num_corners; i++) { free(corners[i]); free(corners_norm[i]); }
+            free(corners); free(corners_norm);
+            free(center); free(half_width);
+            return;
+        } else {
+            for (size_t j = 0; j < dim; j++) {
+                lp_solution_norm[j] = b_copy[j];
+            }
+            lp_solution_norm[dim] = b_copy[dim];
         }
     }
 
@@ -399,35 +475,27 @@ static expr_t *create_softmax_expr(fppoly_internal_t *pr, neuron_t *out_neuron,
             fprintf(stderr, "TIER4 TRIGGERED: output %zu, max_coeff=%.2e, intercept=%.2e\n",
                     output_idx, max_coeff, final_intercept);
             
-            // Better fallback: center-based tangent
-            double *center_point = (double *)malloc(dim * sizeof(double));
-            for (size_t j = 0; j < dim; j++) {
-                center_point[j] = (in_neurons[j]->lb + in_neurons[j]->ub) / 2.0;
-            }
-            
-            double input_vals[dim];
-            for (size_t j = 0; j < dim; j++) {
-                input_vals[j] = center_point[j];
-            }
-            double max_val = input_vals[0];
-            for (size_t j = 1; j < dim; j++) {
-                if (input_vals[j] > max_val) max_val = input_vals[j];
-            }
-            double sum_exp = 0.0;
-            for (size_t j = 0; j < dim; j++) {
-                sum_exp += exp((input_vals[j] - max_val) / temperature);
-            }
-            double softmax_at_center = exp((input_vals[output_idx] - max_val) / temperature) / sum_exp;
+            g_exp_tier4_fallback++;
+            // The only sound bound we can assert here is [0, 1].
+            // We are calculating the upper bound (is_lower = false),
+            // so we set the expression to the constant [0, 1].
             
             for (size_t j = 0; j < dim; j++) {
                 res->inf_coeff[j] = 0.0;
                 res->sup_coeff[j] = 0.0;
             }
-            res->inf_cst = -fmin(1.0, softmax_at_center * 1.5);
-            res->sup_cst = fmin(1.0, softmax_at_center * 1.5);
+            // Set expression to constant interval [0, 1]
+            // Remember: inf_cst = -L = -0.0
+            //           sup_cst =  U =  1.0
+            res->inf_cst = 0.0; 
+            res->sup_cst = 1.0; 
             
-            free(center_point);
-        } else {
+            // Free the center_point you allocated but no longer need
+            // free(center_point); // You had this in your original TIER4 block
+            
+        } 
+        else
+        {
             for (size_t j = 0; j < dim; j++) {
                 double final_slope = slope * phi_coeffs[j];
                 res->inf_coeff[j] = -final_slope;
@@ -557,4 +625,14 @@ double apply_softmax_uexpr(fppoly_internal_t *pr, expr_t **uexpr_p,
                           size_t output_idx, double temperature) {
     return apply_softmax_expr(pr, uexpr_p, neurons, num_neurons,
                              output_idx, false, temperature);
+}
+
+void print_softmax_approximation_stats(void) {
+    fprintf(stderr, "\n--- Softmax Approximation Stats ---\n");
+    fprintf(stderr, "TOTAL CALLS:   %lu\n", total_calls);
+    fprintf(stderr, "LSE LP Success (Tier 1):   %lu\n", g_lse_lp_success);
+    fprintf(stderr, "LSE SVD Fallback (Tier 2):   %lu\n", g_lse_svd_fallback);
+    fprintf(stderr, "LSE Tangent Fallback (Tier 3): %lu\n", g_lse_tangent_fallback);
+    fprintf(stderr, "Exp TIER4 Fallback (Tier 4): %lu\n", g_exp_tier4_fallback);
+    fprintf(stderr, "-----------------------------------\n");
 }
